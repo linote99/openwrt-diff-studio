@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -29,6 +30,13 @@ public class RuntimeAndProfileTest {
         assertTrue(OtaPackage.patchFilename(old, f50, "new.zip").contains("-F50Pro-"));
         assertTrue(OtaPackage.patchFilename(old, u30, "new.zip").contains("-U30Pro-"));
         assertTrue(OtaPackage.patchFilename(old, lym, "new.zip").contains("-LYM-10K-"));
+    }
+
+    @Test
+    public void modelScopedRuntimeAssetsOverrideSharedAssets() throws Exception {
+        assertEquals("ota/mu300/boot.py", OtaRuntime.supportAssetPath("mu300", "boot.py", path -> path.equals("ota/mu300/boot.py")));
+        assertEquals("ota/rpc.py", OtaRuntime.supportAssetPath("e5", "rpc.py", path -> false));
+        assertEquals("ota/e5/engine.py", OtaRuntime.supportAssetPath("e5", "engine.py", path -> false));
     }
 
     @Test

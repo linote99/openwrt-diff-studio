@@ -1,5 +1,10 @@
 # 更新日志
 
+## 1.1.3（versionCode 8，本地候选版，未发布）
+- 从 MU300 25.12.5 r20261118 完整固件中提取并校验设备端 OTA engine、boot、RPC、proxy、LuCI 页面和 ACL；Android 生成的 MU300 差分包不再用旧内嵌脚本覆盖新版固件运行时。
+- 支持按 E5 / MU300 分别选择运行时脚本；MU300 用新版机型专属资源，E5 继续回退到原共享资源，E5 engine 未更改。
+- 已使用 MU300 r20261029 → r20261118 完整固件通过 Android 实际解析与差分回归；目标版本识别为 OpenWrt 25.12.5 / kernel 7.2.8，差分可导出且六个 MU300 运行时文件的 SHA-256 与新版固件及 APK 内资源一致。完整单元测试和 Debug APK 构建通过；本地候选 APK 使用标准 Android Debug 签名；本次仅推送源码，不创建 GitHub Release，尚未在真实手机或路由器刷入测试。
+
 ## 1.1.2（versionCode 7，已发布）
 - 同步与 Diff Studio 源快照哈希一致的共享后端更新文件，加入 `host.py`、`resources.py`、`ssh_runtime.py` 所需依赖，并更新 E5 / MU300 导出清单。
 - Android 文件名映射新增 `F50Pro`、`U30Pro`、`LYM-10K`；生成的 OTA bootstrap 将临时运行目录 session ID 与审核后的补丁 ID 分开处理。

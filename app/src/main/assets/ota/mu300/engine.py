@@ -28,12 +28,15 @@ MAX_BYTES = 2 << 30
 MAX_FILES = 50000
 STATE = 'etc/unisoc-ota'
 HEX = re.compile(r'[0-9a-f]{64}')
+# Keep the clean release database in a verified payload, not in the manifest
+# returned verbatim by older LuCI/rpcd inspection handlers.
+INDEX_RUNTIME = 'ota/release-index.json'
 # Persistent state, board firmware/NV and package-manager ownership are never
 # overwritten by release diffs. APK metadata uses explicit per-package merging.
 PROTECTED = ('lib/firmware', 'lib/apk', 'usr/lib/opkg', 'usr/lib/apk',
              'opt/e5/vendor', 'opt/e5/firmware', 'opt/e5/nv', 'opt/e5/android',
              'opt/mu300/vendor', 'opt/mu300/firmware', 'opt/mu300/nv',
-             'etc/unisoc-ota', 'etc/uci-defaults')
+             'etc/e5-nv', 'etc/unisoc-ota', 'etc/uci-defaults')
 # Retained as an empty API alias for older desktop imports, not a scope gate.
 OFFLINE_ONLY = ()
 
@@ -93,6 +96,25 @@ def package_paths(record):
         if line.startswith('F:'): directory = line[2:]
         elif line.startswith('R:'): paths.add(directory+'/'+line[2:] if directory else line[2:])
     return paths
+
+
+def package_replacements(installed, target, removed):
+    """A new provider may replace a base variant, e.g. dnsmasq -> full.
+
+    Require both a declared virtual provider and overlapping owned files;
+    merely sharing a dependency or dropping a package is not a replacement.
+    User-added packages are never candidates for automatic removal.
+    """
+    replaced = set()
+    for name in removed & installed.keys():
+        owned = package_paths(installed[name])
+        for record in target.values():
+            provided = next((s[2:].split() for s in record.splitlines() if s.startswith('p:')), [])
+            if (name in {re.split(r'[<>=~]', value, 1)[0] for value in provided}
+                    and owned & package_paths(record)):
+                replaced.add(name)
+                break
+    return replaced
 
 
 def merge_scripts(current, target):
@@ -177,6 +199,9 @@ def validate_manifest(m):
             raise ValueError('Invalid ' + k)
     if m['base_version'] == m['target_version']:
         raise ValueError('Release versions are identical')
+    if 'release_index' in m:
+        from baseline import validate_target
+        validate_target(m['release_index'], m)
     ops = m.get('operations')
     if not isinstance(ops, list) or not 0 <= len(ops) <= MAX_FILES or not ops and not m.get('boot'):
         raise ValueError('Empty or excessive OTA operations')
@@ -256,6 +281,16 @@ class Patch:
                 with self.archive.open(info) as stream:
                     if digest(stream) != h:
                         raise ValueError('OTA content checksum mismatch: ' + h)
+            self.release_index = self.manifest.get('release_index')
+            index = self.manifest.get('runtime', {}).get(INDEX_RUNTIME)
+            if index is not None:
+                if self.release_index is not None:
+                    raise ValueError('Duplicate target release indexes')
+                if index['kind'] != 'file' or index['size'] > MAX_MANIFEST:
+                    raise ValueError('Invalid target release index payload')
+                self.release_index = json.loads(self.archive.read('blobs/' + index['sha256']))
+                from baseline import validate_target
+                validate_target(self.release_index, self.manifest)
         except BaseException:
             self.archive.close()
             raise
@@ -427,10 +462,11 @@ class Engine:
             if op['after'] and op['after']['kind'] == 'file': incoming += op['after']['size']
         boot_work = bool(m.get('boot')) or self.root == Path('/') or os.environ.get('UNISOC_OTA_LIVE') == '1'
         if boot_work:
-            from boot import target, check_file
+            from boot import target, check_file, native_scratch_bytes
             check_file(target(self.root, m['family']), m['family'])
             backup += 64 << 20
             incoming += (128 if m.get('boot') else 64) << 20
+            incoming += native_scratch_bytes(self.root, m['family'], bool(m.get('boot')))
         required = backup + incoming + (32 << 20)
         required += sum(d.get('size', 0) for d in m.get('runtime', {}).values())
         free = shutil.disk_usage(self.root).free
@@ -449,13 +485,14 @@ class Engine:
         installed_path = self.root/'lib/apk/db/installed'
         installed = package_records(installed_path.read_bytes()) if installed_path.is_file() else {}
         extra_packages = set(installed)-set(m.get('base_packages', {}))
-        retained = set(extra_packages)
-        retained.update(set(m.get('base_packages', {}))-set(m.get('target_packages', {})))
+        removed_base = set(m.get('base_packages', {}))-set(m.get('target_packages', {}))
         target_records = {}
         for op in m['operations']:
             if op.get('merge') == 'apk-db' and op.get('after'):
                 target_records = package_records(patch.archive.read('blobs/'+op['after']['sha256']))
                 break
+        replaced = package_replacements(installed, target_records, removed_base)
+        retained = extra_packages | (removed_base - replaced)
         owned = set()
         for name in retained:
             if name in installed: owned.update(package_paths(installed[name]))
@@ -475,7 +512,7 @@ class Engine:
                 with patch.archive.open('blobs/'+after['sha256']) as stream: new = stream.read()
                 current = self.path(name).read_bytes() if actual else b''
                 if merge == 'apk-db':
-                    records = package_records(current)
+                    records = {n:r for n,r in package_records(current).items() if n not in replaced}
                     records.update({n:r for n,r in package_records(new).items() if n not in extra_packages})
                     new = ('\n\n'.join(records[n].rstrip('\n') for n in sorted(records))+'\n\n').encode()
                 elif merge == 'apk-scripts':
@@ -485,6 +522,8 @@ class Engine:
                 else:
                     separator = ':' if merge == 'accounts' else None
                     lines = current.decode().splitlines()
+                    if merge == 'world':
+                        lines = [line for line in lines if re.split(r'[<>=~]', line, 1)[0] not in replaced]
                     keys = {line.split(separator, 1)[0] if separator else re.split(r'[<>=~]', line, 1)[0] for line in lines}
                     for line in new.decode().splitlines():
                         key = line.split(separator, 1)[0] if separator else re.split(r'[<>=~]', line, 1)[0]
@@ -502,6 +541,32 @@ class Engine:
             if actual and after and actual['kind'] == after['kind'] == 'dir': continue
             op.update(before=actual, after=after)
             ops.append(op)
+        # Package-manager helper files travel in the hashed RAM payload. This
+        # preserves old manifest validators' protected-/lib/apk boundary while
+        # updating only files explicitly owned by the incoming package records.
+        metadata = {path for n,record in target_records.items() if n not in extra_packages
+                    for path in package_paths(record) if path.startswith('lib/apk/packages/')}
+        all_metadata = {path for record in target_records.values() for path in package_paths(record)
+                        if path.startswith('lib/apk/packages/')}
+        for key, after in m.get('runtime', {}).items():
+            if not key.startswith('ota/apk/'):
+                continue
+            name = 'lib/apk/packages/' + key[8:]
+            if name not in all_metadata or '/' in key[8:] or after['kind'] != 'file':
+                raise ValueError('Unowned APK metadata payload: ' + key)
+            if name not in metadata:
+                preserved.append(name); continue
+            actual = descriptor(self.path(name))
+            if actual and actual['kind'] == 'dir':
+                raise ValueError('Cannot replace a user directory: ' + name)
+            if actual != after:
+                ops.append(dict(path=name, before=actual, after=after))
+        for n in replaced:
+            for name in package_paths(installed[n]):
+                if name.startswith('lib/apk/packages/') and name not in metadata:
+                    actual = descriptor(self.path(name))
+                    if actual and actual['kind'] != 'dir':
+                        ops.append(dict(path=name, before=actual, after=None))
         return sorted(ops, key=lambda o:(o['path'].count('/'), o['path'])), generated, preserved
 
     def install_descriptor(self, name, value, source=None):
@@ -588,12 +653,15 @@ class Engine:
             else:
                 self.install_descriptor(op['path'], old)
         if data.get('boot'):
-            from boot import write_file
+            from boot import write_file, native_restore
             original = self.state/data['backup']/'boot.img'
             with original.open('rb') as stream:
                 if digest(stream) != data['boot_sha256']:
                     raise ValueError('Boot recovery backup checksum mismatch')
+            native_restore(self.root, self.state/data['backup'], data.get('boot_companions', []))
             write_file(self.path(data['boot']), original, data['boot_family'])
+        from baseline import restore as restore_baseline
+        restore_baseline(self.state, self.state/data['backup'], data)
         previous = data.get('previous_identity')
         if previous:
             atomic_json(self.state / 'current.json', previous)
@@ -640,7 +708,8 @@ class Engine:
                 except (OSError, ValueError) as error:
                     raise ValueError('Rollback backup corrupt; do not reboot: '+op['path']) from error
         if data.get('boot'):
-            from boot import signature
+            from boot import signature, native_rollback_conflicts
+            conflicts.extend(native_rollback_conflicts(self.root, backup, data.get('boot_companions', [])))
             if data.get('boot_after_signature') and signature(self.path(data['boot']), data['boot_family']) != data['boot_after_signature']:
                 conflicts.append(dict(path=data['boot'], fields=['boot']))
             with (backup/'boot.img').open('rb') as stream:
@@ -698,6 +767,8 @@ class Engine:
         with original.open('rb') as stream: data['boot_sha256'] = digest(stream)
         data['boot_family'] = family
         data['boot_after_signature'] = signature(final, family)
+        from boot import native_prepare
+        data['boot_companions'] = native_prepare(self.root, family, backup, guard, final)
         return guard, final
 
     def apply(self, patch, progress=lambda *_: None):
@@ -724,6 +795,9 @@ class Engine:
                             target_version=patch.manifest['target_version'])
                 if previous.get('backup'):
                     data['previous_transaction'] = {k:v for k,v in previous.items() if k != 'previous_transaction'}
+                if patch.release_index is not None:
+                    from baseline import backup as backup_baseline
+                    backup_baseline(self.state, backup, data)
                 # The large immutable plan is written once, not rewritten for every
                 # file. A compact count journal keeps update writes O(n), not O(n squared).
                 atomic_json(backup / 'plan.json', ops)
@@ -760,7 +834,8 @@ class Engine:
                 atomic_json(journal, data)
             try:
                 if boot_paths and boot_paths[0]:
-                    from boot import write_file
+                    from boot import write_file, native_commit
+                    native_commit(self.root, backup, data.get('boot_companions', []), 'guard')
                     write_file(self.root/data['boot'], boot_paths[0], data['boot_family'])
                 for i, op in enumerate(ops):
                     # Recheck at commit time; a concurrent user edit is a conflict.
@@ -776,12 +851,15 @@ class Engine:
                         raise ValueError('Written file verification failed: ' + op['path'])
                     progress(i + 1, len(ops), op['path'])
                 if boot_paths and boot_paths[1] != boot_paths[0]:
-                    from boot import write_file
+                    from boot import write_file, native_commit
+                    native_commit(self.root, backup, data.get('boot_companions', []), 'final')
                     write_file(self.root/data['boot'], boot_paths[1], data['boot_family'])
                 identity = dict(family=patch.manifest['family'], profile=patch.manifest['profile'],
                                 version=patch.manifest['target_version'], kernel_release=kernel_release)
                 release_file = self.root/('etc/'+patch.manifest['family']+'/release.json')
                 if release_file.is_file(): identity['release_marker'] = hashlib.sha256(release_file.read_bytes()).hexdigest()
+                if patch.release_index is not None:
+                    atomic_json(self.state / 'baseline.json', patch.release_index)
                 atomic_json(self.state / 'current.json', identity)
                 data['status'] = 'complete'
                 data.pop('previous_transaction', None)

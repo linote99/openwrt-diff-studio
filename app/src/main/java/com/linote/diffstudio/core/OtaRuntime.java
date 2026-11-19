@@ -20,6 +20,19 @@ public final class OtaRuntime {
         byte[] read(String family, String name) throws IOException;
     }
 
+    @FunctionalInterface
+    public interface AssetExists {
+        boolean test(String assetPath) throws IOException;
+    }
+
+    /** Prefer family-scoped runtime files, retaining shared assets as the fallback. */
+    public static String supportAssetPath(String family, String name, AssetExists exists) throws IOException {
+        if (!"e5".equals(family) && !"mu300".equals(family)) throw new OtaException("Unsupported device family: " + family);
+        String specific = "ota/" + family + "/" + name;
+        if ("engine.py".equals(name) || exists.test(specific)) return specific;
+        return "ota/" + name;
+    }
+
     public static final String[] TEXT_SUPPORT = {"engine.py", "boot.py", "rpc.py", "proxy.sh", "unisoc-ota.js", "errors.js", "unisoc-ota.json"};
 
     public static LinkedHashMap<String, byte[]> supportSources(String family, SupportFiles files) throws IOException {

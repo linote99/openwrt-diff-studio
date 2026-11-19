@@ -647,8 +647,8 @@ public final class MainActivity extends Activity {
 
         aboutSection(root, n("使用说明", "How to use"), new String[][]{
                 {n("生成差异包", "Create patch")},
-                {"1", n("在“生成差异包”页选择旧版（设备当前运行的版本）和新版完整 ZIP 发行包。旧版也可以用之前保存的版本摘要代替，不必再保留旧版完整包。支持 E5，以及 MU300 / F50 / V50 / U30Air。",
-                        "On Create patch, select the old release (the version the device runs now) and the new full release ZIP. A saved version index can replace the old full ZIP. E5 and MU300 / F50 / V50 / U30Air are supported.")},
+                {"1", n("在“生成差异包”页选择旧版（设备当前运行的版本）和新版完整 ZIP 发行包。旧版也可以用之前保存的版本摘要代替，不必再保留旧版完整包。支持 E5，以及 MU300 / F50 / F50 Pro / U30 Pro / V50 / U30Air / LYM-10K。",
+                        "On Create patch, select the old release (the version the device runs now) and the new full release ZIP. A saved version index can replace the old full ZIP. E5 and MU300 / F50 / F50 Pro / U30 Pro / V50 / U30Air / LYM-10K are supported.")},
                 {"2", n("点击“分析差异”，查看目标设备、版本变化、文件变更和载荷大小；不能生成时会列出原因。",
                         "Tap Analyze to review the target device, version change, changed files and payload size. Blocking reasons are listed if a patch cannot be made.")},
                 {"3", n("点击“导出差异包”保存完整更新包 ZIP（含 update.ota、电脑端更新器和说明），或点击“仅导出 .ota 文件”。",
@@ -1076,11 +1076,19 @@ public final class MainActivity extends Activity {
     private OtaRuntime.SupportFiles support() {
         return (family, name) -> {
             if (!"e5".equals(family) && !"mu300".equals(family)) throw new OtaException("Unsupported device family: " + family);
-            String asset = name.equals("engine.py") ? "ota/" + family + "/engine.py" : "ota/" + name;
+            String asset = OtaRuntime.supportAssetPath(family, name, this::supportAssetExists);
             try (InputStream in = getAssets().open(asset)) {
                 return Py.readAll(in);
             }
         };
+    }
+
+    private boolean supportAssetExists(String assetPath) throws IOException {
+        try (InputStream ignored = getAssets().open(assetPath)) {
+            return true;
+        } catch (java.io.FileNotFoundException missing) {
+            return false;
+        }
     }
 
     /** Updater files bundled with an exported patch, matching that family's desktop edition. */
